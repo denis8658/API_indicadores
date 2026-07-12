@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import ORJSONResponse
 
 from app.cache.market_cache import market_cache
+from app.collectors.data_collector import collector
 from app.services.market_service import market_service
 from app.services.signal_service import signal_service
 
@@ -10,7 +11,7 @@ router = APIRouter(prefix="/market", tags=["market"])
 
 @router.get("/assets", response_class=ORJSONResponse)
 async def get_assets():
-    return {"assets": [{"symbol": "EURUSD", "name": "EUR/USD"}]}
+    return {"assets": await collector.get_assets()}
 
 
 @router.get("/candles", response_class=ORJSONResponse)
@@ -24,7 +25,9 @@ async def get_candles(symbol: str = Query(default="EURUSD")):
 
 @router.get("/ticks", response_class=ORJSONResponse)
 async def get_ticks(symbol: str = Query(default="EURUSD")):
-    return {"ticks": market_cache.get_ticks(symbol)}
+    ticks = await collector.get_ticks(symbol)
+    market_cache.set_ticks(symbol, ticks)
+    return {"ticks": ticks}
 
 
 @router.get("/indicators", response_class=ORJSONResponse)

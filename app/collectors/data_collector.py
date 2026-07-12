@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import asyncio
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -98,13 +96,18 @@ class DataCollector:
 
     async def connect(self) -> Dict[str, Any]:
         if self.client is None:
-            self.client = httpx.AsyncClient(timeout=10.0)
+            self.client = httpx.AsyncClient(timeout=20.0)
 
         raw_ssid = self._normalize_pocket_auth(self.raw_ssid) or self._normalize_pocket_auth(settings.pocket_ssid)
-        payload: Dict[str, Any] = {"ssid": raw_ssid or ""}
+        if not raw_ssid:
+            health = await self.health()
+            if health.get("connected") and health.get("client_initialized"):
+                self.session_info = health
+                self.connected = True
+                return health
+            raise RuntimeError("PocketOption API is not initialized. Configure POCKET_OPTION_SSID or initialize upstream.")
 
-        if not payload["ssid"]:
-            payload = {"api_key": "demo"}
+        payload: Dict[str, Any] = {"ssid": raw_ssid or ""}
 
         response = await self.client.post(f"{self.base_url}/api/init", json=payload)
         response.raise_for_status()
@@ -131,7 +134,7 @@ class DataCollector:
 
     async def health(self) -> Dict[str, Any]:
         if self.client is None:
-            self.client = httpx.AsyncClient(timeout=10.0)
+            self.client = httpx.AsyncClient(timeout=20.0)
         response = await self.client.get(f"{self.base_url}/health")
         response.raise_for_status()
         return response.json()

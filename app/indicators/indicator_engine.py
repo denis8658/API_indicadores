@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pandas as pd
-import pandas_ta as ta
 
 
 class IndicatorEngine:
@@ -9,6 +8,8 @@ class IndicatorEngine:
         self.name = "IndicatorEngine"
 
     def update(self, df: pd.DataFrame) -> pd.DataFrame:
+        import pandas_ta as ta
+
         if df.empty:
             return df
         df = df.copy()
@@ -24,6 +25,8 @@ class IndicatorEngine:
         df["stoch_k"] = ta.stoch(df["high"], df["low"], df["close"]).iloc[:, 0]
         df["stoch_d"] = ta.stoch(df["high"], df["low"], df["close"]).iloc[:, 1]
         df["adx"] = ta.adx(df["high"], df["low"], df["close"]).iloc[:, 0]
-        df["vwap"] = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
-        df["sar"] = ta.sar(df["high"], df["low"], df["close"], acceleration=0.02, maximum=0.2)
+        vwap = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+        df["vwap"] = vwap if vwap is not None else pd.NA
+        psar = ta.psar(df["high"], df["low"], df["close"], af0=0.02, af=0.02, max_af=0.2)
+        df["sar"] = psar.iloc[:, 0] if psar is not None and not psar.empty else pd.NA
         return df

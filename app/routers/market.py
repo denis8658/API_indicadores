@@ -1,5 +1,12 @@
+import asyncio
+import json
+import math
+import time
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
 from fastapi import APIRouter, Query
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 
 from app.cache.market_cache import market_cache
 from app.collectors.data_collector import collector
@@ -21,6 +28,172 @@ async def get_candles(symbol: str = Query(default="EURUSD")):
     if df is None:
         return {"candles": []}
     return {"candles": df.tail(20).to_dict(orient="records")}
+
+
+def _safe_json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        try:
+            return _safe_json_value(value.item())
+        except Exception:
+            pass
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if isinstance(value, dict):
+        return {key: _safe_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_safe_json_value(item) for item in value]
+    return value
+
+
+def _latest_tick(ticks: List[Dict[str, Any]], symbol: str) -> Optional[Dict[str, Any]]:
+    for tick in reversed(ticks):
+        if not isinstance(tick, dict):
+            continue
+        asset = tick.get("asset") or tick.get("symbol")
+        price = tick.get("price") or tick.get("close")
+        if (asset in {None, symbol}) and isinstance(price, (int, float)):
+            return tick
+    return None
+
+
+def _tick_timestamp(tick: Dict[str, Any]) -> int:
+    raw_timestamp = tick.get("timestamp") or tick.get("time")
+    if isinstance(raw_timestamp, (int, float)):
+        return int(raw_timestamp)
+    return int(time.time())
+
+
+def _update_stream_candle(symbol: str, tick: Dict[str, Any], timeframe: int) -> Dict[str, Any]:
+    price = float(tick.get("price") or tick.get("close"))
+    tick_timestamp = _tick_timestamp(tick)
+    candle_timestamp = tick_timestamp - (tick_timestamp % timeframe)
+    df = market_cache.get_candles(symbol)
+
+    if df is None or df.empty:
+        df = pd.DataFrame(
+            [
+                {
+                    "asset": symbol,
+                    "timeframe": timeframe,
+                    "timestamp": candle_timestamp,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": 1.0,
+                }
+            ]
+        )
+    else:
+        df = df.copy()
+        if "asset" not in df.columns:
+            df["asset"] = symbol
+        if "timeframe" not in df.columns:
+            df["timeframe"] = timeframe
+        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+        last_index = df.index[-1]
+        last_timestamp = int(df.loc[last_index, "timestamp"])
+        if last_timestamp == candle_timestamp:
+            df.loc[last_index, "asset"] = symbol
+            df.loc[last_index, "timeframe"] = timeframe
+            df.loc[last_index, "high"] = max(float(df.loc[last_index, "high"]), price)
+            df.loc[last_index, "low"] = min(float(df.loc[last_index, "low"]), price)
+            df.loc[last_index, "close"] = price
+            df.loc[last_index, "volume"] = float(df.loc[last_index].get("volume", 0.0) or 0.0) + 1.0
+        elif candle_timestamp > last_timestamp:
+            df = pd.concat(
+                [
+                    df,
+                    pd.DataFrame(
+                        [
+                            {
+                                "asset": symbol,
+                                "timeframe": timeframe,
+                                "timestamp": candle_timestamp,
+                                "open": price,
+                                "high": price,
+                                "low": price,
+                                "close": price,
+                                "volume": 1.0,
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            )
+
+    market_cache.set_candles(symbol, df.tail(500).reset_index(drop=True))
+    candle = market_cache.get_candles(symbol).iloc[-1].to_dict()
+    return _safe_json_value(candle)
+
+
+def _stream_candles_payload(df: Optional[pd.DataFrame]) -> List[Dict[str, Any]]:
+    if df is None or df.empty:
+        return []
+    columns = [column for column in ["asset", "timeframe", "timestamp", "open", "high", "low", "close", "volume"] if column in df.columns]
+    return _safe_json_value(df.tail(40)[columns].to_dict(orient="records"))
+
+
+def _stream_candle_payload(candle: Dict[str, Any]) -> Dict[str, Any]:
+    keys = ["asset", "timeframe", "timestamp", "open", "high", "low", "close", "volume"]
+    return _safe_json_value({key: candle.get(key) for key in keys if key in candle})
+
+
+def _sse(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(_safe_json_value(data), ensure_ascii=False)}\n\n"
+
+
+@router.get("/candles/stream")
+async def stream_candles(
+    symbol: str = Query(default="EURUSD"),
+    timeframe: int = Query(default=60, ge=1, le=3600),
+    interval: float = Query(default=1.0, ge=0.2, le=10.0),
+):
+    async def events():
+        try:
+            if market_cache.get_candles(symbol) is None:
+                await market_service.refresh_market(symbol=symbol)
+            yield _sse(
+                "ready",
+                {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "interval": interval,
+                    "message": "streaming started",
+                },
+            )
+            while True:
+                ticks = await collector.get_ticks(symbol)
+                market_cache.set_ticks(symbol, ticks)
+                tick = _latest_tick(ticks, symbol)
+                if tick is not None:
+                    candle = _update_stream_candle(symbol, tick, timeframe)
+                    df = market_cache.get_candles(symbol)
+                    yield _sse(
+                        "candle",
+                        {
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "tick": tick,
+                            "candle": _stream_candle_payload(candle),
+                            "candles": _stream_candles_payload(df),
+                            "serverTime": int(time.time()),
+                        },
+                    )
+                else:
+                    yield _sse("heartbeat", {"symbol": symbol, "serverTime": int(time.time())})
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @router.get("/ticks", response_class=ORJSONResponse)

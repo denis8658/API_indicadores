@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, ORJSONResponse
 
 from app.config.settings import settings
-from app.routers import market, health
+from app.routers import market, health, panel
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger("market_api")
@@ -29,6 +29,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(market.router)
+app.include_router(panel.router)
 
 
 @app.exception_handler(RequestValidationError)

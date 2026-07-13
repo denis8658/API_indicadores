@@ -79,3 +79,63 @@ def test_signals_autoload_market_when_cache_is_empty(monkeypatch):
     signal = response.json()["signals"][0]
     assert signal["action"] == "CALL"
     assert signal["entryPrice"] == 1.23
+
+
+def test_signals_use_latest_valid_indicators_when_stream_candle_is_partial():
+    symbol = "STREAM_PARTIAL_SIG"
+    market_cache.candles.pop(symbol, None)
+    market_cache.indicators.pop(symbol, None)
+
+    import pandas as pd
+
+    df = pd.DataFrame(
+        [
+            {
+                "timestamp": 1,
+                "open": 1,
+                "high": 1.2,
+                "low": 0.9,
+                "close": 1.1,
+                "volume": 10,
+                "ema_9": 1.08,
+                "ema_21": 1.02,
+                "sma_20": 1.01,
+                "rsi_14": 60,
+                "macd": 0.1,
+                "stoch_k": 70,
+                "stoch_d": 50,
+                "adx": 30,
+                "atr": 0.01,
+                "bb_upper": 1.5,
+                "bb_middle": 1.05,
+                "bb_lower": 0.9,
+                "body_percent": 70,
+                "wick_percent": 30,
+                "breakout": True,
+                "compression": False,
+                "doji": False,
+                "support": 1,
+                "resistance": 1.5,
+                "synthetic_volume": 1,
+                "market_activity_score": 1,
+            },
+            {
+                "timestamp": 2,
+                "open": 1.1,
+                "high": 1.25,
+                "low": 1.08,
+                "close": 1.24,
+                "volume": 1,
+            },
+        ]
+    )
+    market_cache.set_candles(symbol, df)
+    market_cache.set_indicators(symbol, df.drop(columns=["timestamp", "open", "high", "low", "close", "volume"]))
+
+    response = client.get(f"/market/signals?symbol={symbol}")
+
+    assert response.status_code == 200
+    signal = response.json()["signals"][0]
+    assert signal["entryPrice"] == 1.24
+    assert signal["confluence"]["passedFilters"] > 0
+    assert signal["action"] == "CALL"

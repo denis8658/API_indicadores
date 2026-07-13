@@ -185,9 +185,63 @@ class SignalService:
             score += 5
         return score, filters
 
-    def build_signal(self, symbol: str = "EURUSD") -> Dict[str, Any]:
+    def _latest_market_row(self, symbol: str) -> pd.Series | None:
         df = market_cache.get_candles(symbol)
         if df is None or df.empty:
+            return None
+
+        latest = df.iloc[-1].copy()
+        indicator_columns = [
+            "ema_9",
+            "ema_21",
+            "sma_20",
+            "rsi_14",
+            "macd",
+            "bb_upper",
+            "bb_middle",
+            "bb_lower",
+            "atr",
+            "stoch_k",
+            "stoch_d",
+            "adx",
+            "vwap",
+            "sar",
+            "swing_high",
+            "swing_low",
+            "support",
+            "resistance",
+            "equal_high",
+            "equal_low",
+            "body_percent",
+            "wick_percent",
+            "doji",
+            "breakout",
+            "compression",
+            "synthetic_volume",
+            "market_activity_score",
+        ]
+
+        available_columns = [column for column in indicator_columns if column in df.columns]
+        if available_columns:
+            valid_rows = df[df[available_columns].notna().any(axis=1)]
+            if not valid_rows.empty:
+                latest_valid = valid_rows.iloc[-1]
+                for column in available_columns:
+                    if column not in latest or pd.isna(latest.get(column)):
+                        latest[column] = latest_valid.get(column)
+
+        indicators = market_cache.get_indicators(symbol)
+        if indicators is not None and not indicators.empty:
+            latest_indicators = indicators.iloc[-1]
+            for column in latest_indicators.index:
+                if column not in latest or pd.isna(latest.get(column)):
+                    latest[column] = latest_indicators.get(column)
+
+        return latest
+
+    def build_signal(self, symbol: str = "EURUSD") -> Dict[str, Any]:
+        latest = self._latest_market_row(symbol)
+        if latest is None:
             return {
                 "symbol": symbol,
                 "action": "NONE",
@@ -202,7 +256,6 @@ class SignalService:
                 "filters": [],
                 "confluence": {},
             }
-        latest = df.iloc[-1]
         trend_score, trend_filters, trend, market_phase = self._trend_filter(latest)
         momentum_score, momentum_filters = self._momentum_filter(latest, trend)
         volatility_score, volatility_filters, volatility_ok = self._volatility_filter(latest)

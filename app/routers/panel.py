@@ -968,7 +968,7 @@ USAGE_PANEL_HTML = """
   <script>
     const state = { data: null, auto: null, stream: null, streamAsset: null };
     const el = id => document.getElementById(id);
-    const fields = ['ema_9','ema_21','sma_20','rsi_14','macd','bb_upper','bb_middle','bb_lower','atr','stoch_k','stoch_d','adx','vwap','sar'];
+    const priorityFields = ['ema_9','ema_21','sma_20','rsi_14','macd','bb_upper','bb_middle','bb_lower','atr','stoch_k','stoch_d','adx','vwap','sar'];
 
     function fmt(value, digits = 5) {
       if (value === null || value === undefined || value === '') return '-';
@@ -1055,7 +1055,10 @@ USAGE_PANEL_HTML = """
         ['Tendencia', signal.trend || '-']
       ]);
 
-      kv(el('indicatorKv'), fields.map(name => [name, fmt(indicator[name], 4)]));
+      const dynamicFields = Object.keys(indicator)
+        .filter(name => !priorityFields.includes(name))
+        .sort((a, b) => a.localeCompare(b));
+      kv(el('indicatorKv'), [...priorityFields, ...dynamicFields].map(name => [name, fmt(indicator[name], 4)]));
       const analysis = data.analysis || {};
       kv(el('analysisKv'), [
         ['Trend', JSON.stringify(analysis.trend || {})],

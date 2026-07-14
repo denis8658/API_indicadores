@@ -12,7 +12,8 @@ class SyntheticVolumeEngine:
         if df.empty:
             return df
         df = df.copy()
-        df["tick_count"] = 1
+        volume = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
+        df["tick_count"] = volume.where(volume.gt(0), 1.0)
         df["range"] = df["high"] - df["low"]
         df["body"] = (df["close"] - df["open"]).abs()
         df["upper_wick"] = (df["high"] - df[["open", "close"]].max(axis=1)).abs()
@@ -24,18 +25,11 @@ class SyntheticVolumeEngine:
         )
         df["tick_speed"] = df["close"].diff().abs().rolling(5).mean()
         df["tick_acceleration"] = df["tick_speed"].diff().abs()
-        raw = (
-            df["tick_count"]
-            + df["tick_weight"]
-            + df["atr"]
-            + df["range"]
-            + df["body"]
-            + df["upper_wick"]
-            + df["lower_wick"]
-            + df["bollinger_width"]
-            + df["tick_speed"]
-            + df["tick_acceleration"]
-        )
-        df["synthetic_volume"] = (raw / raw.replace(0, np.nan).rolling(10).mean()).fillna(0)
+        components = ["tick_count", "tick_weight", "atr", "range", "body", "upper_wick", "lower_wick", "bollinger_width", "tick_speed", "tick_acceleration"]
+        normalized = []
+        for column in components:
+            baseline = df[column].replace(0, np.nan).rolling(20, min_periods=5).mean()
+            normalized.append(df[column].div(baseline).replace([np.inf, -np.inf], np.nan))
+        df["synthetic_volume"] = pd.concat(normalized, axis=1).mean(axis=1, skipna=True).fillna(0)
         df["market_activity_score"] = df["synthetic_volume"].rolling(10).mean()
         return df

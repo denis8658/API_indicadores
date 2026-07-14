@@ -412,6 +412,20 @@ Mercado:
 - `GET /market/order-blocks`
 - `GET /market/liquidity`
 - `GET /market/support-resistance`
+- `GET /market/signal-history?symbol=EURUSD&timeframe=60`
+- `GET /market/backtest?symbol=EURUSD&timeframe=60`
+
+Todos os endpoints analiticos por ativo aceitam `timeframe` em segundos. O valor padrao continua sendo `60`; por exemplo:
+
+```bash
+curl "http://127.0.0.1:8000/market/trend?symbol=EURUSD&timeframe=300"
+```
+
+## Analises E Persistencia
+
+O pipeline calcula tendencia, momentum, volatilidade, price action, BOS, CHoCH, pivots, suporte, resistencia, liquidez, order blocks e confluencia. Endpoints, sinais e backtest usam os mesmos calculos.
+
+Candles e sinais sao persistidos em SQLite no caminho definido por `DATABASE_PATH`. Quando novos candles chegam, sinais vencidos sao avaliados automaticamente como `WIN`, `LOSS` ou `DRAW`; `/market/statistics` usa esses resultados reais. `/market/backtest` executa uma simulacao historica sem gravar operacoes artificiais no historico real.
 
 ## Exemplo Com Python
 

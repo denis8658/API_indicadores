@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 import pandas as pd
 
 from app.cache.market_cache import market_cache
+from app.services.storage_service import storage_service
 
 
 class SignalService:
@@ -185,8 +186,8 @@ class SignalService:
             score += 5
         return score, filters
 
-    def _latest_market_row(self, symbol: str) -> pd.Series | None:
-        df = market_cache.get_candles(symbol)
+    def _latest_market_row(self, symbol: str, timeframe: int = 60, frame: pd.DataFrame | None = None) -> pd.Series | None:
+        df = frame if frame is not None else market_cache.get_candles(symbol, timeframe)
         if df is None or df.empty:
             return None
 
@@ -230,7 +231,7 @@ class SignalService:
                     if column not in latest or pd.isna(latest.get(column)):
                         latest[column] = latest_valid.get(column)
 
-        indicators = market_cache.get_indicators(symbol)
+        indicators = None if frame is not None else market_cache.get_indicators(symbol, timeframe)
         if indicators is not None and not indicators.empty:
             latest_indicators = indicators.iloc[-1]
             for column in latest_indicators.index:
@@ -239,11 +240,12 @@ class SignalService:
 
         return latest
 
-    def build_signal(self, symbol: str = "EURUSD") -> Dict[str, Any]:
-        latest = self._latest_market_row(symbol)
+    def build_signal(self, symbol: str = "EURUSD", timeframe: int = 60, frame: pd.DataFrame | None = None, include_history: bool = True) -> Dict[str, Any]:
+        latest = self._latest_market_row(symbol, timeframe, frame)
         if latest is None:
             return {
                 "symbol": symbol,
+                "timeframe": timeframe,
                 "action": "NONE",
                 "score": 0.0,
                 "confidence": 0.0,
@@ -293,17 +295,19 @@ class SignalService:
         ][:4]
         reason = ", ".join(reasons) if reasons else "Sem confluencia suficiente"
 
+        historical_accuracy = storage_service.statistics(symbol, timeframe)["accuracy"] if include_history else 0.0
         return {
             "symbol": symbol,
+            "timeframe": timeframe,
             "action": action,
             "score": round(raw_score, 2),
             "confidence": round(confidence, 2),
             "reason": reason,
-            "expiration": 30,
+            "expiration": timeframe,
             "entryPrice": self._num(latest.get("close")),
             "marketPhase": market_phase,
             "trend": trend,
-            "historicalAccuracy": 0.62,
+            "historicalAccuracy": historical_accuracy,
             "filters": filters,
             "confluence": {
                 "callVotes": call_votes,

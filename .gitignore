@@ -5,7 +5,13 @@ __pycache__/
 .venv/
 venv/
 .env
+*.db
+*.db-shm
+*.db-wal
+.browser-test-profile/
+uvicorn-test*.log
 .env.*
+!.env.example
 .pytest_cache/
 .coverage
 htmlcov/

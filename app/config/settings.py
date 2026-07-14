@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     cache_ttl_seconds: int = 30
     max_candles: int = 500
+    database_path: str = "market_intelligence.db"
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = False

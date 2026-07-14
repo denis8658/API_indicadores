@@ -188,10 +188,10 @@ class DataCollector:
             headers["ssid"] = self.ssid
         return headers
 
-    async def get_candles(self, symbol: str = "EURUSD", limit: int = 500) -> List[Dict[str, Any]]:
+    async def get_candles(self, symbol: str = "EURUSD", limit: int = 500, timeframe: int = 60) -> List[Dict[str, Any]]:
         if not self.connected:
             await self.connect()
-        payload = {"asset": symbol, "timeframe": 60, "count": limit}
+        payload = {"asset": symbol, "timeframe": timeframe, "count": limit}
         response = await self.client.post(
             f"{self.base_url}/api/candles",
             json=payload,

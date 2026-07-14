@@ -12,8 +12,19 @@ from app.cache.market_cache import market_cache
 from app.collectors.data_collector import collector
 from app.services.market_service import market_service
 from app.services.signal_service import signal_service
+from app.services.analysis_service import analysis_service
+from app.services.backtest_service import backtest_service
+from app.services.storage_service import storage_service
 
 router = APIRouter(prefix="/market", tags=["market"])
+
+
+async def _refresh_market(symbol: str, timeframe: int) -> Dict[str, Any]:
+    # Calling M1 with the legacy signature also keeps integrations that monkeypatch
+    # or wrap refresh_market(symbol) working.
+    if timeframe == 60:
+        return await market_service.refresh_market(symbol=symbol)
+    return await market_service.refresh_market(symbol=symbol, timeframe=timeframe)
 
 
 @router.get("/assets", response_class=ORJSONResponse)
@@ -22,9 +33,9 @@ async def get_assets():
 
 
 @router.get("/candles", response_class=ORJSONResponse)
-async def get_candles(symbol: str = Query(default="EURUSD")):
-    await market_service.refresh_market(symbol=symbol)
-    df = market_cache.get_candles(symbol)
+async def get_candles(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    await _refresh_market(symbol, timeframe)
+    df = market_cache.get_candles(symbol, timeframe)
     if df is None:
         return {"candles": []}
     return {"candles": _safe_json_value(df.tail(20).to_dict(orient="records"))}
@@ -74,7 +85,7 @@ def _update_stream_candle(symbol: str, tick: Dict[str, Any], timeframe: int) -> 
     price = float(tick.get("price") or tick.get("close"))
     tick_timestamp = _tick_timestamp(tick)
     candle_timestamp = tick_timestamp - (tick_timestamp % timeframe)
-    df = market_cache.get_candles(symbol)
+    df = market_cache.get_candles(symbol, timeframe)
 
     if df is None or df.empty:
         df = pd.DataFrame(
@@ -129,8 +140,8 @@ def _update_stream_candle(symbol: str, tick: Dict[str, Any], timeframe: int) -> 
                 ignore_index=True,
             )
 
-    market_cache.set_candles(symbol, df.tail(500).reset_index(drop=True))
-    candle = market_cache.get_candles(symbol).iloc[-1].to_dict()
+    market_cache.set_candles(symbol, df.tail(500).reset_index(drop=True), timeframe)
+    candle = market_cache.get_candles(symbol, timeframe).iloc[-1].to_dict()
     return _safe_json_value(candle)
 
 
@@ -158,8 +169,8 @@ async def stream_candles(
 ):
     async def events():
         try:
-            if market_cache.get_candles(symbol) is None:
-                await market_service.refresh_market(symbol=symbol)
+            if market_cache.get_candles(symbol, timeframe) is None:
+                await _refresh_market(symbol, timeframe)
             yield _sse(
                 "ready",
                 {
@@ -175,7 +186,10 @@ async def stream_candles(
                 tick = _latest_tick(ticks, symbol)
                 if tick is not None:
                     candle = _update_stream_candle(symbol, tick, timeframe)
-                    df = market_cache.get_candles(symbol)
+                    raw_df = market_cache.get_candles(symbol, timeframe)
+                    df = market_service.process_dataframe(symbol, timeframe, raw_df) if raw_df is not None else raw_df
+                    signal = signal_service.build_signal(symbol, timeframe)
+                    market_cache.set_signal(symbol, signal, timeframe)
                     yield _sse(
                         "candle",
                         {
@@ -184,6 +198,7 @@ async def stream_candles(
                             "tick": tick,
                             "candle": _stream_candle_payload(candle),
                             "candles": _stream_candles_payload(df),
+                            "signal": signal,
                             "serverTime": int(time.time()),
                         },
                     )
@@ -204,54 +219,60 @@ async def get_ticks(symbol: str = Query(default="EURUSD")):
 
 
 @router.get("/indicators", response_class=ORJSONResponse)
-async def get_indicators(symbol: str = Query(default="EURUSD")):
-    indicators = market_cache.get_indicators(symbol)
+async def get_indicators(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    indicators = market_cache.get_indicators(symbol, timeframe)
     if indicators is None or indicators.empty:
-        await market_service.refresh_market(symbol=symbol)
-        indicators = market_cache.get_indicators(symbol)
+        await _refresh_market(symbol, timeframe)
+        indicators = market_cache.get_indicators(symbol, timeframe)
     if indicators is None or indicators.empty:
         return {"indicators": []}
     return {"indicators": _safe_json_value(indicators.tail(5).to_dict(orient="records"))}
 
 
 @router.get("/features", response_class=ORJSONResponse)
-async def get_features(symbol: str = Query(default="EURUSD")):
-    if market_cache.get_candles(symbol) is None:
-        await market_service.refresh_market(symbol=symbol)
-    return {"features": market_cache.get_features(symbol)}
+async def get_features(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    if market_cache.get_candles(symbol, timeframe) is None:
+        await _refresh_market(symbol, timeframe)
+    return {"features": _safe_json_value(market_cache.get_features(symbol, timeframe))}
 
 
 @router.get("/market-structure", response_class=ORJSONResponse)
-async def get_market_structure(symbol: str = Query(default="EURUSD")):
-    if market_cache.get_candles(symbol) is None:
-        await market_service.refresh_market(symbol=symbol)
-    return {"marketStructure": market_cache.structures.get(symbol, {})}
+async def get_market_structure(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    if market_cache.get_candles(symbol, timeframe) is None:
+        await _refresh_market(symbol, timeframe)
+    return {"marketStructure": _safe_json_value(market_cache.get_structures(symbol, timeframe))}
 
 
 @router.get("/price-action", response_class=ORJSONResponse)
-async def get_price_action():
-    return {"priceAction": []}
+async def get_price_action(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"priceAction": _safe_json_value(analysis_service.price_action(df, symbol, timeframe))}
 
 
 @router.get("/signals", response_class=ORJSONResponse)
-async def get_signals(symbol: str = Query(default="EURUSD")):
-    df = market_cache.get_candles(symbol)
+async def get_signals(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = market_cache.get_candles(symbol, timeframe)
     if df is None or df.empty:
-        await market_service.refresh_market(symbol=symbol)
-    return {"signals": [signal_service.build_signal(symbol)]}
+        await _refresh_market(symbol, timeframe)
+        df = market_cache.get_candles(symbol, timeframe)
+    signal = signal_service.build_signal(symbol, timeframe)
+    market_cache.set_signal(symbol, signal, timeframe)
+    if df is not None and not df.empty:
+        storage_service.save_signal(signal, timeframe, int(df.iloc[-1]["timestamp"]))
+    return {"signals": [_safe_json_value(signal)]}
 
 
 @router.get("/statistics", response_class=ORJSONResponse)
-async def get_statistics():
-    return {"statistics": {"accuracy": 0.62, "wins": 10, "losses": 6, "draws": 2}}
+async def get_statistics(symbol: Optional[str] = Query(default=None), timeframe: Optional[int] = Query(default=None, ge=5, le=86400)):
+    return {"statistics": storage_service.statistics(symbol, timeframe)}
 
 
 @router.get("/activity", response_class=ORJSONResponse)
-async def get_activity(symbol: str = Query(default="EURUSD")):
-    df = market_cache.get_candles(symbol)
+async def get_activity(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = market_cache.get_candles(symbol, timeframe)
     if df is None or df.empty:
-        await market_service.refresh_market(symbol=symbol)
-        df = market_cache.get_candles(symbol)
+        await _refresh_market(symbol, timeframe)
+        df = market_cache.get_candles(symbol, timeframe)
     if df is None or df.empty:
         return {"activity": {}}
     latest = df.iloc[-1]
@@ -266,11 +287,11 @@ async def get_activity(symbol: str = Query(default="EURUSD")):
 
 
 @router.get("/dashboard", response_class=ORJSONResponse)
-async def get_dashboard(symbol: str = Query(default="EURUSD")):
-    df = market_cache.get_candles(symbol)
+async def get_dashboard(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = market_cache.get_candles(symbol, timeframe)
     if df is None or df.empty:
-        await market_service.refresh_market(symbol=symbol)
-    return {"dashboard": _safe_json_value(market_service.get_latest_snapshot(symbol))}
+        await _refresh_market(symbol, timeframe)
+    return {"dashboard": _safe_json_value(market_service.get_latest_snapshot(symbol, timeframe))}
 
 
 @router.get("/cache", response_class=ORJSONResponse)
@@ -279,49 +300,76 @@ async def get_cache():
 
 
 @router.get("/history", response_class=ORJSONResponse)
-async def get_history(symbol: str = Query(default="EURUSD")):
-    df = market_cache.get_candles(symbol)
+async def get_history(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = market_cache.get_candles(symbol, timeframe)
     if df is None or df.empty:
-        await market_service.refresh_market(symbol=symbol)
-        df = market_cache.get_candles(symbol)
+        await _refresh_market(symbol, timeframe)
+        df = market_cache.get_candles(symbol, timeframe)
     if df is None or df.empty:
         return {"history": []}
     return {"history": _safe_json_value(df.tail(10).to_dict(orient="records"))}
 
 
 @router.get("/trend", response_class=ORJSONResponse)
-async def get_trend(symbol: str = Query(default="EURUSD")):
-    return {"trend": {"symbol": symbol, "status": "ready"}}
+async def get_trend(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"trend": _safe_json_value(analysis_service.trend(df, symbol, timeframe))}
 
 
 @router.get("/volatility", response_class=ORJSONResponse)
-async def get_volatility(symbol: str = Query(default="EURUSD")):
-    return {"volatility": {"symbol": symbol, "status": "ready"}}
+async def get_volatility(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"volatility": _safe_json_value(analysis_service.volatility(df, symbol, timeframe))}
 
 
 @router.get("/momentum", response_class=ORJSONResponse)
-async def get_momentum(symbol: str = Query(default="EURUSD")):
-    return {"momentum": {"symbol": symbol, "status": "ready"}}
+async def get_momentum(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"momentum": _safe_json_value(analysis_service.momentum(df, symbol, timeframe))}
 
 
 @router.get("/confluence", response_class=ORJSONResponse)
-async def get_confluence(symbol: str = Query(default="EURUSD")):
-    return {"confluence": {"symbol": symbol, "status": "ready"}}
+async def get_confluence(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    signal = signal_service.build_signal(symbol, timeframe)
+    return {"confluence": _safe_json_value(analysis_service.confluence(df, symbol, timeframe, signal))}
 
 
 @router.get("/order-blocks", response_class=ORJSONResponse)
-async def get_order_blocks():
-    return {"orderBlocks": []}
+async def get_order_blocks(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"orderBlocks": _safe_json_value(analysis_service.order_blocks(df, symbol, timeframe))}
 
 
 @router.get("/liquidity", response_class=ORJSONResponse)
-async def get_liquidity():
-    return {"liquidity": []}
+async def get_liquidity(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"liquidity": _safe_json_value(analysis_service.liquidity(df, symbol, timeframe))}
 
 
 @router.get("/support-resistance", response_class=ORJSONResponse)
-async def get_support_resistance():
-    return {"supportResistance": []}
+async def get_support_resistance(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"supportResistance": _safe_json_value(analysis_service.support_resistance(df, symbol, timeframe))}
+
+
+async def _ensure_market(symbol: str, timeframe: int) -> pd.DataFrame:
+    df = market_cache.get_candles(symbol, timeframe)
+    if df is None or df.empty:
+        await _refresh_market(symbol, timeframe)
+        df = market_cache.get_candles(symbol, timeframe)
+    return df if df is not None else pd.DataFrame()
+
+
+@router.get("/signal-history", response_class=ORJSONResponse)
+async def get_signal_history(symbol: Optional[str] = Query(default=None), timeframe: Optional[int] = Query(default=None, ge=5, le=86400), limit: int = Query(default=100, ge=1, le=1000)):
+    return {"history": storage_service.signal_history(symbol, timeframe, limit)}
+
+
+@router.get("/backtest", response_class=ORJSONResponse)
+async def get_backtest(symbol: str = Query(default="EURUSD"), timeframe: int = Query(default=60, ge=5, le=86400), warmup: int = Query(default=40, ge=20, le=300)):
+    df = await _ensure_market(symbol, timeframe)
+    return {"backtest": _safe_json_value(backtest_service.run(df, symbol, timeframe, warmup))}
 
 
 @router.get("/health", response_class=ORJSONResponse)

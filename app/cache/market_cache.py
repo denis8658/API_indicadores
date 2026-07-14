@@ -12,51 +12,66 @@ class MarketCache:
         self.candles: Dict[str, pd.DataFrame] = {}
         self.ticks: Dict[str, List[Dict[str, Any]]] = {}
         self.indicators: Dict[str, pd.DataFrame] = {}
-        self.features: Dict[str, Dict[str, float]] = {}
+        self.features: Dict[str, Dict[str, Any]] = {}
         self.structures: Dict[str, Dict[str, Any]] = {}
         self.signals: Dict[str, Dict[str, Any]] = {}
         self.statistics: Dict[str, Any] = {}
         self.synthetic_volume: Dict[str, Dict[str, float]] = {}
 
-    def set_candles(self, symbol: str, df: pd.DataFrame) -> None:
-        with self._lock:
-            self.candles[symbol] = df.copy()
+    @staticmethod
+    def key(symbol: str, timeframe: int = 60) -> str:
+        """Keep the original M1 cache keys while isolating other timeframes."""
+        return symbol if timeframe == 60 else f"{symbol}:{timeframe}"
 
-    def get_candles(self, symbol: str) -> Optional[pd.DataFrame]:
+    def set_candles(self, symbol: str, df: pd.DataFrame, timeframe: int = 60) -> None:
         with self._lock:
-            return self.candles.get(symbol)
+            self.candles[self.key(symbol, timeframe)] = df.copy()
 
-    def set_ticks(self, symbol: str, ticks: List[Dict[str, Any]]) -> None:
+    def get_candles(self, symbol: str, timeframe: int = 60) -> Optional[pd.DataFrame]:
         with self._lock:
-            self.ticks[symbol] = ticks
+            value = self.candles.get(self.key(symbol, timeframe))
+            return value.copy() if value is not None else None
 
-    def get_ticks(self, symbol: str) -> List[Dict[str, Any]]:
+    def set_ticks(self, symbol: str, ticks: List[Dict[str, Any]], timeframe: int = 60) -> None:
         with self._lock:
-            return self.ticks.get(symbol, [])
+            self.ticks[self.key(symbol, timeframe)] = list(ticks)
 
-    def set_indicators(self, symbol: str, df: pd.DataFrame) -> None:
+    def get_ticks(self, symbol: str, timeframe: int = 60) -> List[Dict[str, Any]]:
         with self._lock:
-            self.indicators[symbol] = df.copy()
+            return list(self.ticks.get(self.key(symbol, timeframe), []))
 
-    def get_indicators(self, symbol: str) -> Optional[pd.DataFrame]:
+    def set_indicators(self, symbol: str, df: pd.DataFrame, timeframe: int = 60) -> None:
         with self._lock:
-            return self.indicators.get(symbol)
+            self.indicators[self.key(symbol, timeframe)] = df.copy()
 
-    def set_structures(self, symbol: str, structures: Dict[str, Any]) -> None:
+    def get_indicators(self, symbol: str, timeframe: int = 60) -> Optional[pd.DataFrame]:
         with self._lock:
-            self.structures[symbol] = structures
+            value = self.indicators.get(self.key(symbol, timeframe))
+            return value.copy() if value is not None else None
 
-    def get_structures(self, symbol: str) -> Dict[str, Any]:
+    def set_structures(self, symbol: str, structures: Dict[str, Any], timeframe: int = 60) -> None:
         with self._lock:
-            return self.structures.get(symbol, {})
+            self.structures[self.key(symbol, timeframe)] = structures
 
-    def set_features(self, symbol: str, features: Dict[str, float]) -> None:
+    def get_structures(self, symbol: str, timeframe: int = 60) -> Dict[str, Any]:
         with self._lock:
-            self.features[symbol] = features
+            return dict(self.structures.get(self.key(symbol, timeframe), {}))
 
-    def get_features(self, symbol: str) -> Dict[str, float]:
+    def set_features(self, symbol: str, features: Dict[str, Any], timeframe: int = 60) -> None:
         with self._lock:
-            return self.features.get(symbol, {})
+            self.features[self.key(symbol, timeframe)] = features
+
+    def get_features(self, symbol: str, timeframe: int = 60) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self.features.get(self.key(symbol, timeframe), {}))
+
+    def set_signal(self, symbol: str, signal: Dict[str, Any], timeframe: int = 60) -> None:
+        with self._lock:
+            self.signals[self.key(symbol, timeframe)] = signal
+
+    def get_signal(self, symbol: str, timeframe: int = 60) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self.signals.get(self.key(symbol, timeframe), {}))
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:

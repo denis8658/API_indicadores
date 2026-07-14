@@ -232,43 +232,76 @@ class IndicatorEngine:
         return df
 
     def _apply_compatibility_aliases(self, df: pd.DataFrame) -> pd.DataFrame:
-        import pandas_ta as ta
+        close, high, low = df["close"], df["high"], df["low"]
+        df["ema_9"] = close.ewm(span=9, adjust=False).mean()
+        df["ema_21"] = close.ewm(span=21, adjust=False).mean()
+        df["sma_20"] = close.rolling(20).mean()
 
-        df["ema_9"] = ta.ema(df["close"], length=9)
-        df["ema_21"] = ta.ema(df["close"], length=21)
-        df["sma_20"] = ta.sma(df["close"], length=20)
-        df["rsi_14"] = ta.rsi(df["close"], length=14)
-        macd = ta.macd(df["close"])
-        df["macd"] = macd["MACD_12_26_9"] if macd is not None and "MACD_12_26_9" in macd else pd.NA
-        bbands = ta.bbands(df["close"])
-        if bbands is not None and not bbands.empty:
-            df["bb_upper"] = bbands.iloc[:, 0]
-            df["bb_middle"] = bbands.iloc[:, 1]
-            df["bb_lower"] = bbands.iloc[:, 2]
-        else:
-            df["bb_upper"] = pd.NA
-            df["bb_middle"] = pd.NA
-            df["bb_lower"] = pd.NA
-        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
-        stoch = ta.stoch(df["high"], df["low"], df["close"])
-        if stoch is not None and not stoch.empty:
-            df["stoch_k"] = stoch.iloc[:, 0]
-            df["stoch_d"] = stoch.iloc[:, 1]
-        else:
-            df["stoch_k"] = pd.NA
-            df["stoch_d"] = pd.NA
-        adx = ta.adx(df["high"], df["low"], df["close"])
-        df["adx"] = adx.iloc[:, 0] if adx is not None and not adx.empty else pd.NA
-        vwap = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
-        df["vwap"] = vwap if vwap is not None else pd.NA
-        psar = ta.psar(df["high"], df["low"], df["close"], af0=0.02, af=0.02, max_af=0.2)
-        df["sar"] = psar.iloc[:, 0] if psar is not None and not psar.empty else pd.NA
+        delta = close.diff()
+        gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+        relative_strength = gain / loss.replace(0, float("nan"))
+        df["rsi_14"] = (100 - 100 / (1 + relative_strength)).where(loss.ne(0), 100.0)
+        ema_12 = close.ewm(span=12, adjust=False).mean()
+        ema_26 = close.ewm(span=26, adjust=False).mean()
+        df["macd"] = ema_12 - ema_26
+
+        middle = close.rolling(20).mean()
+        deviation = close.rolling(20).std(ddof=0)
+        df["bb_lower"] = middle - 2 * deviation
+        df["bb_middle"] = middle
+        df["bb_upper"] = middle + 2 * deviation
+
+        previous_close = close.shift(1)
+        true_range = pd.concat([(high - low).abs(), (high - previous_close).abs(), (low - previous_close).abs()], axis=1).max(axis=1)
+        df["atr"] = true_range.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+        lowest = low.rolling(14).min()
+        highest = high.rolling(14).max()
+        df["stoch_k"] = 100 * (close - lowest) / (highest - lowest).replace(0, float("nan"))
+        df["stoch_d"] = df["stoch_k"].rolling(3).mean()
+
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+        smooth_tr = true_range.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+        plus_di = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean() / smooth_tr.replace(0, float("nan"))
+        minus_di = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean() / smooth_tr.replace(0, float("nan"))
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, float("nan"))
+        df["adx"] = dx.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+
+        typical = (high + low + close) / 3
+        volume = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+        cumulative_volume = volume.cumsum()
+        df["vwap"] = (typical * volume).cumsum() / cumulative_volume.replace(0, float("nan"))
+        df["sar"] = self._parabolic_sar(high, low)
         return df
+
+    def _parabolic_sar(self, high: pd.Series, low: pd.Series) -> pd.Series:
+        if high.empty:
+            return pd.Series(dtype=float, index=high.index)
+        values = [float(low.iloc[0])]
+        bullish, extreme, acceleration = True, float(high.iloc[0]), 0.02
+        for index in range(1, len(high)):
+            sar = values[-1] + acceleration * (extreme - values[-1])
+            if bullish:
+                sar = min(sar, float(low.iloc[index - 1]), float(low.iloc[max(0, index - 2)]))
+                if float(low.iloc[index]) < sar:
+                    bullish, sar, extreme, acceleration = False, extreme, float(low.iloc[index]), 0.02
+                elif float(high.iloc[index]) > extreme:
+                    extreme, acceleration = float(high.iloc[index]), min(0.2, acceleration + 0.02)
+            else:
+                sar = max(sar, float(high.iloc[index - 1]), float(high.iloc[max(0, index - 2)]))
+                if float(high.iloc[index]) > sar:
+                    bullish, sar, extreme, acceleration = True, extreme, float(high.iloc[index]), 0.02
+                elif float(low.iloc[index]) < extreme:
+                    extreme, acceleration = float(low.iloc[index]), min(0.2, acceleration + 0.02)
+            values.append(sar)
+        return pd.Series(values, index=high.index, dtype=float)
 
     def update(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df
         df = df.copy()
-        df = self._apply_all_pandas_ta(df)
         df = self._apply_compatibility_aliases(df)
         return df.copy()
